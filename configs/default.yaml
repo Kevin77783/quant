@@ -1,0 +1,29 @@
+data:
+  provider: auto
+  local_file: data/sample_prices.csv
+  adjust: qfq
+  interval: 1d
+
+backtest:
+  initial_cash: 100000
+  commission_bps: 2.0
+  slippage_bps: 1.0
+  risk_free_rate: 0.02
+
+strategy:
+  name: ma
+  short_window: 5
+  long_window: 20
+  max_weight: 1.0
+
+universe:
+  - symbol: 000001.SZ
+    market: cn
+    name: 平安银行
+  - symbol: 0700.HK
+    market: hk
+    name: 腾讯控股
+  - symbol: AAPL
+    market: us
+    name: Apple
+

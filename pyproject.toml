@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-market-quant-system"
+version = "0.1.0"
+description = "A practical multi-market stock quantitative analysis and backtesting system for CN/HK/US equities."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Quant System" }]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "PyYAML>=6.0"
+]
+
+[project.optional-dependencies]
+data = [
+  "akshare>=1.14",
+  "yfinance>=0.2"
+]
+dev = [
+  "pytest>=7.0"
+]
+
+[project.scripts]
+quant = "quant_system.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
