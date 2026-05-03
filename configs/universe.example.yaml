@@ -1,0 +1,23 @@
+universe:
+  cn:
+    - symbol: 000001.SZ
+      name: 平安银行
+    - symbol: 600519.SH
+      name: 贵州茅台
+    - symbol: 300750.SZ
+      name: 宁德时代
+  hk:
+    - symbol: 0700.HK
+      name: 腾讯控股
+    - symbol: 9988.HK
+      name: 阿里巴巴-W
+    - symbol: 3690.HK
+      name: 美团-W
+  us:
+    - symbol: AAPL
+      name: Apple
+    - symbol: MSFT
+      name: Microsoft
+    - symbol: NVDA
+      name: Nvidia
+

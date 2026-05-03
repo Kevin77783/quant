@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -9,15 +10,24 @@ import numpy as np
 import pandas as pd
 
 from quant_system.analysis import analyze_prices, screen_universe
-from quant_system.backtest import BacktestConfig, BacktestEngine
+from quant_system.backtest import BacktestConfig, BacktestEngine, PortfolioBacktestConfig, PortfolioBacktestEngine
 from quant_system.config import load_yaml, parse_universe, parse_universe_argument
-from quant_system.data import AkShareProvider, AutoDataProvider, CSVDataProvider, DataProvider, YahooFinanceProvider
+from quant_system.data import (
+    AkShareProvider,
+    AutoDataProvider,
+    CachedDataProvider,
+    CSVDataProvider,
+    DataProvider,
+    YahooFinanceProvider,
+)
+from quant_system.reporting import write_analysis_html, write_backtest_html
 from quant_system.strategies import build_strategy
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(args.verbose)
     try:
         return int(args.func(args))
     except Exception as exc:
@@ -29,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="quant",
         description="Multi-market stock quant analysis and backtesting CLI.",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable info-level runtime logs.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser("doctor", help="Check runtime dependencies and optional data providers.")
@@ -40,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--market", required=True, choices=["cn", "hk", "us"], help="Market code.")
     analyze.add_argument("--risk-free-rate", type=float, default=0.0)
     analyze.add_argument("--output", help="Optional JSON output path.")
+    analyze.add_argument("--html-report", help="Optional HTML analysis report path.")
     analyze.set_defaults(func=cmd_analyze)
 
     backtest = subparsers.add_parser("backtest", help="Backtest one stock strategy.")
@@ -52,7 +64,27 @@ def build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--slippage-bps", type=float, default=1.0)
     backtest.add_argument("--risk-free-rate", type=float, default=0.0)
     backtest.add_argument("--output-dir", default="reports/backtest", help="Directory for CSV outputs.")
+    backtest.add_argument("--html-report", help="Optional HTML report path.")
     backtest.set_defaults(func=cmd_backtest)
+
+    portfolio = subparsers.add_parser("portfolio", help="Backtest a factor-ranked multi-stock portfolio.")
+    add_data_args(portfolio)
+    portfolio.add_argument("--config", default="configs/default.yaml", help="YAML config with universe.")
+    portfolio.add_argument(
+        "--universe",
+        default="",
+        help="Override config universe. Format: 000001.SZ:cn,0700.HK:hk,AAPL:us",
+    )
+    portfolio.add_argument("--top-n", type=int, default=None, help="Number of stocks held after each rebalance.")
+    portfolio.add_argument("--rebalance-frequency", type=int, default=None, help="Trading-day rebalance interval.")
+    portfolio.add_argument("--weighting", choices=["equal", "inverse_vol"], default=None)
+    portfolio.add_argument("--initial-cash", type=float, default=None)
+    portfolio.add_argument("--commission-bps", type=float, default=None)
+    portfolio.add_argument("--slippage-bps", type=float, default=None)
+    portfolio.add_argument("--risk-free-rate", type=float, default=None)
+    portfolio.add_argument("--output-dir", default="reports/portfolio", help="Directory for portfolio CSV outputs.")
+    portfolio.add_argument("--html-report", help="Optional HTML report path.")
+    portfolio.set_defaults(func=cmd_portfolio)
 
     screen = subparsers.add_parser("screen", help="Rank a multi-market stock universe.")
     add_data_args(screen)
@@ -71,6 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
 def add_data_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", choices=["csv", "auto", "akshare", "yahoo"], default="csv")
     parser.add_argument("--data-file", default="data/sample_prices.csv", help="CSV file or directory for local data.")
+    parser.add_argument("--cache-dir", default="data", help="Root directory containing raw/processed data caches.")
+    parser.add_argument("--no-cache", action="store_true", help="Disable cache read/write for online providers.")
     parser.add_argument("--start", help="Start date, for example 2025-01-01.")
     parser.add_argument("--end", help="End date, for example 2025-12-31.")
     parser.add_argument("--adjust", default="qfq", help="Adjustment mode for online providers.")
@@ -94,17 +128,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "yaml": _import_status("yaml"),
         "akshare": _import_status("akshare"),
         "yfinance": _import_status("yfinance"),
+        "streamlit": _import_status("streamlit"),
     }
     print("Runtime check")
     for name, status in checks.items():
         print(f"  {name:<8} {status}")
     print("\nCore workflow works offline with --provider csv and data/sample_prices.csv.")
-    print("Online A/HK/US data requires optional packages: pip install -e '.[data]'.")
+    if checks["akshare"].startswith("missing") or checks["yfinance"].startswith("missing"):
+        print("Online A/HK/US data requires optional packages: pip install -e '.[data]'.")
+    else:
+        print("Online data providers are installed. Use --provider auto/yahoo/akshare.")
+    if checks["streamlit"].startswith("missing"):
+        print("Streamlit UI requires: pip install -e '.[app]'.")
+    else:
+        print("Streamlit UI is installed. Run: streamlit run apps/streamlit_app.py")
     return 0
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    provider = build_provider(args.provider, args.data_file)
+    provider = build_provider(args.provider, args.data_file, args.cache_dir, not args.no_cache)
     prices = provider.get_history(
         args.symbol,
         args.market,
@@ -118,11 +160,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if args.output:
         write_json(args.output, report)
         print(f"\nWrote {args.output}")
+    if args.html_report:
+        write_analysis_html(report, args.html_report)
+        print(f"Wrote {args.html_report}")
     return 0
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
-    provider = build_provider(args.provider, args.data_file)
+    provider = build_provider(args.provider, args.data_file, args.cache_dir, not args.no_cache)
     prices = provider.get_history(
         args.symbol,
         args.market,
@@ -150,10 +195,54 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     )
     result = engine.run(prices, strategy)
     result.save(args.output_dir)
+    if args.html_report:
+        write_backtest_html(result.equity_curve, result.metrics, args.html_report, title=f"{args.symbol} Backtest")
     print(f"Backtest: {args.symbol} {args.market} strategy={strategy.name}")
     print_metrics(result.metrics)
     print(f"Trades: {len(result.trades)}")
     print(f"Wrote {args.output_dir}")
+    if args.html_report:
+        print(f"Wrote {args.html_report}")
+    return 0
+
+
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    config = load_yaml(args.config) if args.config else {}
+    universe = parse_universe_argument(args.universe) if args.universe else parse_universe(config)
+    if not universe:
+        raise ValueError("Universe is empty. Use --config or --universe.")
+    data_config = config.get("data", {})
+    backtest_config = config.get("backtest", {})
+    portfolio_config = config.get("portfolio", {})
+    provider = build_provider(
+        args.provider or data_config.get("provider", "csv"),
+        args.data_file or data_config.get("local_file"),
+        args.cache_dir or data_config.get("cache_dir", "data"),
+        not args.no_cache,
+    )
+    engine = PortfolioBacktestEngine(
+        PortfolioBacktestConfig(
+            initial_cash=_coalesce(args.initial_cash, backtest_config.get("initial_cash", 100000.0)),
+            commission_bps=_coalesce(args.commission_bps, backtest_config.get("commission_bps", 2.0)),
+            slippage_bps=_coalesce(args.slippage_bps, backtest_config.get("slippage_bps", 1.0)),
+            risk_free_rate=_coalesce(args.risk_free_rate, backtest_config.get("risk_free_rate", 0.0)),
+            top_n=int(_coalesce(args.top_n, portfolio_config.get("top_n", 5))),
+            rebalance_frequency=int(_coalesce(args.rebalance_frequency, portfolio_config.get("rebalance_frequency", 20))),
+            weighting=str(_coalesce(args.weighting, portfolio_config.get("weighting", "equal"))),
+        )
+    )
+    result = engine.run(universe, provider, start=args.start, end=args.end)
+    result.save(args.output_dir)
+    if args.html_report:
+        write_backtest_html(result.equity_curve, result.metrics, args.html_report, title="Portfolio Backtest")
+    print("Portfolio backtest")
+    print_metrics(result.metrics)
+    print(f"Rebalances: {int(result.metrics.get('rebalance_count', 0))}")
+    print(f"Loaded symbols: {int(result.metrics.get('loaded_symbols', 0))}")
+    print(f"Failed symbols: {int(result.metrics.get('failed_symbols', 0))}")
+    print(f"Wrote {args.output_dir}")
+    if args.html_report:
+        print(f"Wrote {args.html_report}")
     return 0
 
 
@@ -162,11 +251,17 @@ def cmd_screen(args: argparse.Namespace) -> int:
     universe = parse_universe_argument(args.universe) if args.universe else parse_universe(config)
     if not universe:
         raise ValueError("Universe is empty. Use --config or --universe.")
-    provider_name = args.provider or config.get("data", {}).get("provider", "csv")
-    local_file = args.data_file or config.get("data", {}).get("local_file")
-    provider = build_provider(provider_name, local_file)
+    data_config = config.get("data", {})
+    provider_name = args.provider or data_config.get("provider", "csv")
+    local_file = args.data_file or data_config.get("local_file")
+    provider = build_provider(provider_name, local_file, args.cache_dir, not args.no_cache)
     ranked = screen_universe(universe, provider, start=args.start, end=args.end, top=args.top)
     print(ranked.drop(columns=["turnover_proxy"]).to_string(index=False))
+    failures = ranked.attrs.get("failures", [])
+    if failures:
+        print("\nSkipped:")
+        for failure in failures:
+            print(f"  {failure}")
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         ranked.to_csv(args.output, index=False)
@@ -174,19 +269,37 @@ def cmd_screen(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_provider(name: str, data_file: str | None) -> DataProvider:
+def build_provider(
+    name: str,
+    data_file: str | None,
+    cache_dir: str = "data",
+    use_cache: bool = True,
+) -> DataProvider:
     normalized = name.strip().lower()
     if normalized == "csv":
         if not data_file:
             raise ValueError("--data-file is required for provider=csv.")
         return CSVDataProvider(data_file)
     if normalized == "auto":
-        return AutoDataProvider(data_file)
+        return AutoDataProvider(data_file, cache_dir=cache_dir, use_cache=use_cache)
     if normalized == "akshare":
-        return AkShareProvider()
+        provider: DataProvider = AkShareProvider()
+        return CachedDataProvider(provider, cache_dir=cache_dir) if use_cache else provider
     if normalized == "yahoo":
-        return YahooFinanceProvider()
+        provider = YahooFinanceProvider()
+        return CachedDataProvider(provider, cache_dir=cache_dir) if use_cache else provider
     raise ValueError(f"Unknown provider: {name}")
+
+
+def configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+
+def _coalesce(value: Any, fallback: Any) -> Any:
+    return fallback if value is None else value
 
 
 def print_analysis(report: dict[str, Any]) -> None:
@@ -249,4 +362,3 @@ def _import_status(module: str) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

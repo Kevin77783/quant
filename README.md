@@ -13,6 +13,7 @@ python -m quant_system.cli doctor
 python -m quant_system.cli analyze --symbol 000001.SZ --market cn --data-file data/sample_prices.csv
 python -m quant_system.cli backtest --symbol AAPL --market us --data-file data/sample_prices.csv --strategy ma
 python -m quant_system.cli screen --config configs/default.yaml --data-file data/sample_prices.csv
+python -m quant_system.cli portfolio --config configs/default.yaml --data-file data/sample_prices.csv
 python examples/basic_workflow.py
 ```
 
@@ -41,11 +42,14 @@ python examples/basic_workflow.py
 
 ```bash
 conda activate quant
-pip install -e ".[data,dev]"
 python -m quant_system.cli analyze --symbol 000001.SZ --market cn --provider auto
 python -m quant_system.cli analyze --symbol 0700.HK --market hk --provider auto
-python -m quant_system.cli analyze --symbol AAPL --market us --provider auto
+python -m quant_system.cli analyze --symbol AAPL --market us --provider yahoo
 ```
+
+Conda 环境已经包含 `akshare`、`yfinance` 和 Streamlit。普通虚拟环境如需在线行情，运行 `pip install -e ".[data,dev]"`。
+
+`--provider auto` 会优先尝试在线源，成功后写入 `data/raw/` 和 `data/processed/`；在线源不可用时再读取缓存，最后才回退到 `--data-file` 指定的本地 CSV。要强制在线美股数据，用 `--provider yahoo`；要强制本地样例数据，用 `--provider csv`。
 
 ## 支持市场与代码格式
 
@@ -58,11 +62,18 @@ python -m quant_system.cli analyze --symbol AAPL --market us --provider auto
 ## 主要能力
 
 - 数据层：统一 OHLCV 字段，支持本地 CSV、AkShare、Yahoo Finance，在线源失败时会给出清晰错误。
+- 数据缓存：在线数据自动写入 `data/raw/` 和 `data/processed/`，便于复现实验和减少重复请求。
+- 数据校验：检查缺失字段、无效日期、非正价格、负成交量、OHLC 高低价关系错误。
 - 分析层：收益率、均线、EMA、RSI、MACD、布林带、ATR、波动率、回撤、夏普等指标。
+- 多因子：趋势、20/60 日动量、波动率、流动性、RSI 平衡、MACD、ATR、回撤综合打分。
 - 策略层：均线交叉、RSI 均值回归、Donchian 突破，策略输出统一为目标仓位。
 - 回测层：下一交易日执行信号，包含佣金、滑点、换手成本、权益曲线、交易明细和绩效指标。
+- 组合回测：按多因子分数定期选 Top N，支持等权和逆波动率加权。
 - 风控层：波动率目标仓位、固定风险预算仓位、Kelly 上限、最大回撤熔断工具。
-- CLI：`analyze`、`backtest`、`screen`、`doctor` 四个常用入口。
+- 报告：单票分析、单票回测、组合回测均可输出 CSV/JSON/HTML。
+- CLI：`analyze`、`backtest`、`portfolio`、`screen`、`doctor` 五个常用入口。
+- Web UI：提供 Streamlit 页面，适合快速交互式分析。
+- CI：GitHub Actions 自动运行测试和 `quant doctor`。
 
 ## 常用命令
 
@@ -73,7 +84,8 @@ python -m quant_system.cli analyze \
   --symbol 000001.SZ \
   --market cn \
   --data-file data/sample_prices.csv \
-  --output reports/000001_analysis.json
+  --output reports/000001_analysis.json \
+  --html-report reports/000001_analysis.html
 ```
 
 回测：
@@ -87,7 +99,8 @@ python -m quant_system.cli backtest \
   --short-window 5 \
   --long-window 20 \
   --initial-cash 100000 \
-  --output-dir reports/aapl_ma
+  --output-dir reports/aapl_ma \
+  --html-report reports/aapl_ma/report.html
 ```
 
 多市场选股：
@@ -97,6 +110,25 @@ python -m quant_system.cli screen \
   --config configs/default.yaml \
   --data-file data/sample_prices.csv \
   --top 10
+```
+
+组合回测：
+
+```bash
+python -m quant_system.cli portfolio \
+  --config configs/default.yaml \
+  --data-file data/sample_prices.csv \
+  --top-n 3 \
+  --rebalance-frequency 5 \
+  --weighting equal \
+  --output-dir reports/portfolio \
+  --html-report reports/portfolio/report.html
+```
+
+Streamlit 页面：
+
+```bash
+streamlit run apps/streamlit_app.py
 ```
 
 ## 本地 CSV 格式
@@ -123,6 +155,8 @@ configs/       默认配置
 data/          示例行情
 examples/      最小 API 调用示例
 environment.yml Conda 环境定义
+apps/          Streamlit 应用
+.github/       GitHub Actions CI
 tests/         单元测试
 reports/       CLI 输出目录
 ```

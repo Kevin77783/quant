@@ -23,10 +23,12 @@ data = [
 dev = [
   "pytest>=7.0"
 ]
+app = [
+  "streamlit>=1.32"
+]
 
 [project.scripts]
 quant = "quant_system.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

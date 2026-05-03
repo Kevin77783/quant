@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import logging
 from pathlib import Path
 
 import pandas as pd
 
 from quant_system.models import Market, normalize_ohlcv, normalize_symbol
+
+logger = logging.getLogger(__name__)
 
 
 class DataProvider(ABC):
@@ -52,6 +55,7 @@ class CSVDataProvider(DataProvider):
             frame = frame[raw_markets == parsed_market.value]
 
         data = normalize_ohlcv(frame, symbol=normalized_symbol, market=parsed_market)
+        logger.info("Loaded %s %s from CSV source %s", normalized_symbol, parsed_market.value, self.source)
         return _filter_dates(data, start=start, end=end)
 
     def _read_source(self, normalized_symbol: str) -> pd.DataFrame:
@@ -107,7 +111,9 @@ class AkShareProvider(DataProvider):
             )
         else:
             raise ValueError("AkShareProvider is intended for cn/hk. Use YahooFinanceProvider for us.")
-        return normalize_ohlcv(frame, symbol=symbol, market=parsed_market)
+        data = normalize_ohlcv(frame, symbol=symbol, market=parsed_market)
+        logger.info("Loaded %s %s from AkShare", normalize_symbol(symbol, parsed_market), parsed_market.value)
+        return data
 
 
 class YahooFinanceProvider(DataProvider):
@@ -148,14 +154,115 @@ class YahooFinanceProvider(DataProvider):
                 "Volume": "volume",
             }
         )
-        return normalize_ohlcv(history, symbol=symbol, market=parsed_market)
+        data = normalize_ohlcv(history, symbol=symbol, market=parsed_market)
+        logger.info("Loaded %s %s from Yahoo Finance", normalize_symbol(symbol, parsed_market), parsed_market.value)
+        return data
+
+
+class DataCache:
+    """Read and write canonical market data caches under data/raw and data/processed."""
+
+    def __init__(self, root: str | Path = "data"):
+        self.root = Path(root)
+        self.raw_dir = self.root / "raw"
+        self.processed_dir = self.root / "processed"
+
+    def load(
+        self,
+        symbol: str,
+        market: str | Market,
+        start: str | None = None,
+        end: str | None = None,
+        adjust: str = "qfq",
+        interval: str = "1d",
+    ) -> pd.DataFrame | None:
+        parsed_market = Market.parse(market)
+        path = self._path(self.processed_dir, symbol, parsed_market, adjust, interval)
+        if not path.exists():
+            return None
+        data = normalize_ohlcv(pd.read_csv(path), symbol=symbol, market=parsed_market)
+        logger.info("Loaded %s %s from cache %s", normalize_symbol(symbol, parsed_market), parsed_market.value, path)
+        return _filter_dates(data, start=start, end=end)
+
+    def save(
+        self,
+        frame: pd.DataFrame,
+        symbol: str,
+        market: str | Market,
+        adjust: str = "qfq",
+        interval: str = "1d",
+        provider_name: str = "online",
+    ) -> None:
+        parsed_market = Market.parse(market)
+        data = normalize_ohlcv(frame, symbol=symbol, market=parsed_market)
+        for base_dir in (self.raw_dir, self.processed_dir):
+            path = self._path(base_dir, symbol, parsed_market, adjust, interval)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cached = data.copy()
+            cached["provider"] = provider_name
+            cached.to_csv(path, index=False)
+            logger.info("Cached %s %s data to %s", normalize_symbol(symbol, parsed_market), parsed_market.value, path)
+
+    def _path(self, base_dir: Path, symbol: str, market: Market, adjust: str, interval: str) -> Path:
+        normalized = normalize_symbol(symbol, market).replace(".", "_")
+        safe_adjust = str(adjust or "none").replace("/", "_")
+        safe_interval = str(interval or "1d").replace("/", "_")
+        return base_dir / market.value / f"{normalized}_{safe_interval}_{safe_adjust}.csv"
+
+
+class CachedDataProvider(DataProvider):
+    """Wrap another provider and persist successful online responses."""
+
+    def __init__(
+        self,
+        provider: DataProvider,
+        cache_dir: str | Path = "data",
+        fallback_to_cache: bool = False,
+    ):
+        self.provider = provider
+        self.cache = DataCache(cache_dir)
+        self.fallback_to_cache = fallback_to_cache
+
+    def get_history(
+        self,
+        symbol: str,
+        market: str | Market,
+        start: str | None = None,
+        end: str | None = None,
+        adjust: str = "qfq",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        try:
+            data = self.provider.get_history(symbol, market, start, end, adjust, interval)
+            self.cache.save(
+                data,
+                symbol=symbol,
+                market=market,
+                adjust=adjust,
+                interval=interval,
+                provider_name=self.provider.__class__.__name__,
+            )
+            return data
+        except Exception:
+            if not self.fallback_to_cache:
+                raise
+            cached = self.cache.load(symbol, market, start, end, adjust, interval)
+            if cached is None:
+                raise
+            return cached
 
 
 class AutoDataProvider(DataProvider):
-    """Try local data first, then market-appropriate online providers."""
+    """Try online providers first, then cache and local CSV fallback."""
 
-    def __init__(self, local_source: str | Path | None = None):
+    def __init__(
+        self,
+        local_source: str | Path | None = None,
+        cache_dir: str | Path = "data",
+        use_cache: bool = True,
+    ):
         self.local_source = Path(local_source) if local_source else None
+        self.cache = DataCache(cache_dir) if use_cache else None
 
     def get_history(
         self,
@@ -167,24 +274,51 @@ class AutoDataProvider(DataProvider):
         interval: str = "1d",
     ) -> pd.DataFrame:
         parsed_market = Market.parse(market)
-        providers: list[DataProvider] = []
-        if self.local_source and self.local_source.exists():
-            providers.append(CSVDataProvider(self.local_source))
-        if parsed_market == Market.CN:
-            providers.extend([AkShareProvider(), YahooFinanceProvider()])
-        elif parsed_market == Market.HK:
-            providers.extend([YahooFinanceProvider(), AkShareProvider()])
-        else:
-            providers.append(YahooFinanceProvider())
+        providers = self._online_providers(parsed_market)
 
         errors: list[str] = []
         for provider in providers:
             try:
-                return provider.get_history(symbol, parsed_market, start, end, adjust, interval)
-            except Exception as exc:  # pragma: no cover - error aggregation depends on optional providers/network.
+                data = provider.get_history(symbol, parsed_market, start, end, adjust, interval)
+                if self.cache:
+                    self.cache.save(
+                        data,
+                        symbol=symbol,
+                        market=parsed_market,
+                        adjust=adjust,
+                        interval=interval,
+                        provider_name=provider.__class__.__name__,
+                    )
+                return data
+            except Exception as exc:  # pragma: no cover - optional providers/network vary by environment.
+                logger.warning("%s failed for %s %s: %s", provider.__class__.__name__, symbol, parsed_market.value, exc)
                 errors.append(f"{provider.__class__.__name__}: {exc}")
+
+        if self.cache:
+            try:
+                cached = self.cache.load(symbol, parsed_market, start, end, adjust, interval)
+                if cached is not None:
+                    return cached
+            except Exception as exc:
+                logger.warning("Cache failed for %s %s: %s", symbol, parsed_market.value, exc)
+                errors.append(f"DataCache: {exc}")
+
+        if self.local_source and self.local_source.exists():
+            try:
+                return CSVDataProvider(self.local_source).get_history(symbol, parsed_market, start, end, adjust, interval)
+            except Exception as exc:
+                logger.warning("Local CSV fallback failed for %s %s: %s", symbol, parsed_market.value, exc)
+                errors.append(f"CSVDataProvider: {exc}")
+
         joined = "\n".join(errors)
         raise RuntimeError(f"All data providers failed for {symbol} ({parsed_market.value}):\n{joined}")
+
+    def _online_providers(self, market: Market) -> list[DataProvider]:
+        if market == Market.CN:
+            return [AkShareProvider(), YahooFinanceProvider()]
+        if market == Market.HK:
+            return [YahooFinanceProvider(), AkShareProvider()]
+        return [YahooFinanceProvider()]
 
 
 def _filter_dates(frame: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
@@ -220,4 +354,3 @@ def _yahoo_symbol(symbol: str, market: Market) -> str:
     if market == Market.CN:
         return normalized
     return normalized.replace(".US", "")
-

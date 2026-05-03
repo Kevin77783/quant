@@ -1,6 +1,8 @@
 data:
   provider: auto
   local_file: data/sample_prices.csv
+  cache_dir: data
+  use_cache: true
   adjust: qfq
   interval: 1d
 
@@ -17,13 +19,23 @@ strategy:
   max_weight: 1.0
 
 universe:
-  - symbol: 000001.SZ
-    market: cn
-    name: 平安银行
-  - symbol: 0700.HK
-    market: hk
-    name: 腾讯控股
-  - symbol: AAPL
-    market: us
-    name: Apple
+  cn:
+    - symbol: 000001.SZ
+      name: 平安银行
+    - symbol: 600519.SH
+      name: 贵州茅台
+  hk:
+    - symbol: 0700.HK
+      name: 腾讯控股
+    - symbol: 9988.HK
+      name: 阿里巴巴-W
+  us:
+    - symbol: AAPL
+      name: Apple
+    - symbol: MSFT
+      name: Microsoft
 
+portfolio:
+  top_n: 3
+  rebalance_frequency: 5
+  weighting: equal

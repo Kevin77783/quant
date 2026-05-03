@@ -21,8 +21,10 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
 
 def parse_universe(config: dict[str, Any]) -> list[Security]:
     raw_items = config.get("universe", [])
+    if isinstance(raw_items, dict):
+        return _parse_grouped_universe(raw_items)
     if not isinstance(raw_items, list):
-        raise ValueError("Config field 'universe' must be a list.")
+        raise ValueError("Config field 'universe' must be a list or market mapping.")
 
     universe: list[Security] = []
     for item in raw_items:
@@ -42,6 +44,27 @@ def parse_universe(config: dict[str, Any]) -> list[Security]:
     return universe
 
 
+def _parse_grouped_universe(raw_items: dict[str, Any]) -> list[Security]:
+    universe: list[Security] = []
+    for market, items in raw_items.items():
+        if not isinstance(items, list):
+            raise ValueError(f"Universe market group {market!r} must be a list.")
+        for item in items:
+            if isinstance(item, str):
+                universe.append(Security.from_raw(symbol=item, market=market))
+            elif isinstance(item, dict):
+                universe.append(
+                    Security.from_raw(
+                        symbol=str(item["symbol"]),
+                        market=market,
+                        name=item.get("name"),
+                    )
+                )
+            else:
+                raise ValueError(f"Invalid universe item under {market!r}: {item!r}")
+    return universe
+
+
 def parse_universe_argument(raw: str) -> list[Security]:
     if not raw.strip():
         return []
@@ -57,4 +80,3 @@ def _parse_symbol_market(raw: str) -> tuple[str, str]:
     if len(parts) != 2 or not all(parts):
         raise ValueError(f"Universe item must be formatted as SYMBOL:market, got {raw!r}")
     return parts[0], parts[1]
-

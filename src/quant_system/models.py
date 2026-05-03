@@ -103,6 +103,7 @@ def normalize_ohlcv(
     frame: pd.DataFrame,
     symbol: str | None = None,
     market: str | Market | None = None,
+    strict: bool = True,
 ) -> pd.DataFrame:
     """Return a clean OHLCV frame with a DatetimeIndex and canonical columns."""
 
@@ -126,11 +127,16 @@ def normalize_ohlcv(
         raise ValueError(f"Price frame missing required columns: {missing}")
 
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
+    if strict and data["date"].isna().any():
+        raise ValueError("Price frame contains invalid dates.")
     data = data.dropna(subset=["date"]).copy()
     for column in ("open", "high", "low", "close", "volume"):
         data[column] = pd.to_numeric(data[column], errors="coerce")
-    data = data.dropna(subset=["open", "high", "low", "close"]).copy()
-    data["volume"] = data["volume"].fillna(0.0)
+    if strict:
+        validate_ohlcv(data)
+    else:
+        data = data.dropna(subset=["open", "high", "low", "close"]).copy()
+        data["volume"] = data["volume"].fillna(0.0)
 
     if symbol is not None:
         parsed_market = market if market is not None else data.get("market", pd.Series(["us"])).iloc[0]
@@ -149,3 +155,29 @@ def normalize_ohlcv(
     data = data[ordered + extras].sort_values("date").drop_duplicates(subset=["date"], keep="last")
     data = data.set_index("date", drop=False)
     return data
+
+
+def validate_ohlcv(frame: pd.DataFrame) -> None:
+    """Validate canonical OHLCV values and raise with actionable messages."""
+
+    missing_numeric = [
+        column
+        for column in ("open", "high", "low", "close", "volume")
+        if column not in frame.columns or frame[column].isna().any()
+    ]
+    if missing_numeric:
+        raise ValueError(f"Price frame contains missing numeric values: {missing_numeric}")
+
+    non_positive = frame[["open", "high", "low", "close"]].le(0).any()
+    bad_price_columns = [column for column, has_bad in non_positive.items() if has_bad]
+    if bad_price_columns:
+        raise ValueError(f"OHLC prices must be positive: {bad_price_columns}")
+
+    if frame["volume"].lt(0).any():
+        raise ValueError("Volume must be non-negative.")
+    if (frame["high"] < frame["low"]).any():
+        raise ValueError("Invalid OHLC row: high is lower than low.")
+    if (frame["open"] > frame["high"]).any() or (frame["open"] < frame["low"]).any():
+        raise ValueError("Invalid OHLC row: open is outside high/low range.")
+    if (frame["close"] > frame["high"]).any() or (frame["close"] < frame["low"]).any():
+        raise ValueError("Invalid OHLC row: close is outside high/low range.")
