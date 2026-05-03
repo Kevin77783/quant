@@ -4,6 +4,28 @@
 
 ## 快速开始
 
+推荐使用 Conda：
+
+```bash
+conda env create -f environment.yml
+conda activate quant
+python -m quant_system.cli doctor
+python -m quant_system.cli analyze --symbol 000001.SZ --market cn --data-file data/sample_prices.csv
+python -m quant_system.cli backtest --symbol AAPL --market us --data-file data/sample_prices.csv --strategy ma
+python -m quant_system.cli screen --config configs/default.yaml --data-file data/sample_prices.csv
+python examples/basic_workflow.py
+```
+
+如果环境已经存在，更新即可：
+
+```bash
+conda env update -f environment.yml --prune
+conda activate quant
+pip install -e ".[dev]"
+```
+
+也可以使用普通虚拟环境：
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -18,6 +40,7 @@ python examples/basic_workflow.py
 如果需要在线行情：
 
 ```bash
+conda activate quant
 pip install -e ".[data,dev]"
 python -m quant_system.cli analyze --symbol 000001.SZ --market cn --provider auto
 python -m quant_system.cli analyze --symbol 0700.HK --market hk --provider auto
@@ -99,6 +122,7 @@ src/quant_system/
 configs/       默认配置
 data/          示例行情
 examples/      最小 API 调用示例
+environment.yml Conda 环境定义
 tests/         单元测试
 reports/       CLI 输出目录
 ```
