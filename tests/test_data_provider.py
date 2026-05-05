@@ -2,6 +2,7 @@ from pathlib import Path
 
 from quant_system.data import CSVDataProvider
 from quant_system.models import Market, normalize_symbol
+from quant_system.workflows import ProviderSettings, build_data_provider
 
 
 def test_csv_provider_filters_symbol_and_market() -> None:
@@ -22,3 +23,11 @@ def test_symbol_normalization_handles_common_market_suffixes() -> None:
     assert normalize_symbol("700", "hk") == "0700.HK"
     assert normalize_symbol("aapl", "us") == "AAPL"
 
+
+def test_workflow_provider_builder_reuses_csv_provider() -> None:
+    provider = build_data_provider(ProviderSettings(provider="csv", data_file="data/sample_prices.csv"))
+
+    data = provider.get_history("AAPL", "us")
+
+    assert isinstance(provider, CSVDataProvider)
+    assert data["symbol"].iloc[-1] == "AAPL"

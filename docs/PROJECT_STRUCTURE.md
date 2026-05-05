@@ -173,6 +173,10 @@ date,symbol,market,open,high,low,close,volume
 
 解释项目中的金融指标、因子、回测指标和风险指标。
 
+### `docs/FRONTEND_BACKEND_ARCHITECTURE.md`
+
+解释当前 Streamlit 工作台架构、前后端职责边界，以及未来升级到 FastAPI + React 的条件。
+
 ## 示例目录：`examples/`
 
 ### `examples/basic_workflow.py`
@@ -297,6 +301,14 @@ quant portfolio
 - 写入 JSON、CSV、HTML 报告
 
 如果要新增一个命令，通常从这里的 `build_parser()` 和对应的 `cmd_xxx()` 开始。
+
+### `src/quant_system/workflows.py`
+
+共享工作流入口。当前主要负责创建数据源对象，让 CLI、Streamlit 页面、示例脚本和未来 API 可以复用同一套 provider 构建逻辑。
+
+### `src/quant_system/timeframe.py`
+
+K 线频率处理工具。当前提供 `resample_ohlcv()`，用于把日线数据重采样成周线或月线。
 
 ### `src/quant_system/data/`
 
@@ -450,6 +462,19 @@ HTML 报告生成。
 
 当前实现使用纯 HTML/CSS/SVG，不依赖额外绘图库，部署和 CI 更简单。
 
+### `src/quant_system/visualization.py`
+
+Plotly 交互式图表构建模块。
+
+当前提供：
+
+- K 线、均线、成交量、RSI、MACD 组合图
+- 因子条形图
+- 综合评分仪表图
+- 净值和回撤图
+- 选股散点图
+- 组合权重图
+
 ## 测试目录：`tests/`
 
 当前测试覆盖：
@@ -583,4 +608,3 @@ CLI portfolio
 - 在线可缓存：真实行情拉取后可复用
 - 报告可落盘：CLI 输出不只停留在终端
 - 测试覆盖核心路径：新增功能应补测试
-

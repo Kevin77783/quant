@@ -12,16 +12,10 @@ import pandas as pd
 from quant_system.analysis import analyze_prices, screen_universe
 from quant_system.backtest import BacktestConfig, BacktestEngine, PortfolioBacktestConfig, PortfolioBacktestEngine
 from quant_system.config import load_yaml, parse_universe, parse_universe_argument
-from quant_system.data import (
-    AkShareProvider,
-    AutoDataProvider,
-    CachedDataProvider,
-    CSVDataProvider,
-    DataProvider,
-    YahooFinanceProvider,
-)
+from quant_system.data import DataProvider
 from quant_system.reporting import write_analysis_html, write_backtest_html
 from quant_system.strategies import build_strategy
+from quant_system.workflows import ProviderSettings, build_data_provider
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,6 +123,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "akshare": _import_status("akshare"),
         "yfinance": _import_status("yfinance"),
         "streamlit": _import_status("streamlit"),
+        "plotly": _import_status("plotly"),
     }
     print("Runtime check")
     for name, status in checks.items():
@@ -138,7 +133,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("Online A/HK/US data requires optional packages: pip install -e '.[data]'.")
     else:
         print("Online data providers are installed. Use --provider auto/yahoo/akshare.")
-    if checks["streamlit"].startswith("missing"):
+    if checks["streamlit"].startswith("missing") or checks["plotly"].startswith("missing"):
         print("Streamlit UI requires: pip install -e '.[app]'.")
     else:
         print("Streamlit UI is installed. Run: streamlit run apps/streamlit_app.py")
@@ -275,20 +270,9 @@ def build_provider(
     cache_dir: str = "data",
     use_cache: bool = True,
 ) -> DataProvider:
-    normalized = name.strip().lower()
-    if normalized == "csv":
-        if not data_file:
-            raise ValueError("--data-file is required for provider=csv.")
-        return CSVDataProvider(data_file)
-    if normalized == "auto":
-        return AutoDataProvider(data_file, cache_dir=cache_dir, use_cache=use_cache)
-    if normalized == "akshare":
-        provider: DataProvider = AkShareProvider()
-        return CachedDataProvider(provider, cache_dir=cache_dir) if use_cache else provider
-    if normalized == "yahoo":
-        provider = YahooFinanceProvider()
-        return CachedDataProvider(provider, cache_dir=cache_dir) if use_cache else provider
-    raise ValueError(f"Unknown provider: {name}")
+    return build_data_provider(
+        ProviderSettings(provider=name, data_file=data_file, cache_dir=cache_dir, use_cache=use_cache)
+    )
 
 
 def configure_logging(verbose: bool) -> None:
