@@ -9,8 +9,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_system.analysis import analyze_prices, screen_universe
-from quant_system.backtest import BacktestConfig, BacktestEngine, PortfolioBacktestConfig, PortfolioBacktestEngine
+from quant_system.analysis import AlertRule, analyze_prices, compare_universe, scan_alerts, screen_universe
+from quant_system.backtest import (
+    BacktestConfig,
+    BacktestEngine,
+    PortfolioBacktestConfig,
+    PortfolioBacktestEngine,
+    optimize_ma_strategy,
+)
 from quant_system.config import load_yaml, parse_universe, parse_universe_argument
 from quant_system.data import DataProvider
 from quant_system.reporting import write_analysis_html, write_backtest_html
@@ -91,6 +97,47 @@ def build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--top", type=int, default=10)
     screen.add_argument("--output", help="Optional CSV output path.")
     screen.set_defaults(func=cmd_screen)
+
+    compare = subparsers.add_parser("compare", help="Compare normalized performance and correlations.")
+    add_data_args(compare)
+    compare.add_argument("--config", default="configs/default.yaml", help="YAML config with universe.")
+    compare.add_argument(
+        "--universe",
+        default="",
+        help="Override config universe. Format: 000001.SZ:cn,0700.HK:hk,AAPL:us",
+    )
+    compare.add_argument("--output-dir", default="reports/compare", help="Directory for comparison CSV outputs.")
+    compare.set_defaults(func=cmd_compare)
+
+    alerts = subparsers.add_parser("alerts", help="Scan a universe for score, RSI, drawdown, and momentum alerts.")
+    add_data_args(alerts)
+    alerts.add_argument("--config", default="configs/default.yaml", help="YAML config with universe.")
+    alerts.add_argument(
+        "--universe",
+        default="",
+        help="Override config universe. Format: 000001.SZ:cn,0700.HK:hk,AAPL:us",
+    )
+    alerts.add_argument("--min-score", type=float, default=80.0)
+    alerts.add_argument("--max-rsi", type=float, default=75.0)
+    alerts.add_argument("--min-rsi", type=float, default=30.0)
+    alerts.add_argument("--max-drawdown", type=float, default=-0.10)
+    alerts.add_argument("--min-momentum-20-pct", type=float, default=-5.0)
+    alerts.add_argument("--include-all", action="store_true", help="Include rows with no triggered alerts.")
+    alerts.add_argument("--output", help="Optional CSV output path.")
+    alerts.set_defaults(func=cmd_alerts)
+
+    optimize = subparsers.add_parser("optimize", help="Grid-search moving-average strategy parameters.")
+    add_data_args(optimize)
+    optimize.add_argument("--symbol", required=True)
+    optimize.add_argument("--market", required=True, choices=["cn", "hk", "us"])
+    optimize.add_argument("--short-windows", default="3,5,10", help="Comma-separated short windows.")
+    optimize.add_argument("--long-windows", default="20,40,60", help="Comma-separated long windows.")
+    optimize.add_argument("--rank-metric", default="sharpe")
+    optimize.add_argument("--initial-cash", type=float, default=100000.0)
+    optimize.add_argument("--commission-bps", type=float, default=2.0)
+    optimize.add_argument("--slippage-bps", type=float, default=1.0)
+    optimize.add_argument("--output", help="Optional CSV output path.")
+    optimize.set_defaults(func=cmd_optimize)
     return parser
 
 
@@ -264,6 +311,89 @@ def cmd_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    config = load_yaml(args.config) if args.config else {}
+    universe = parse_universe_argument(args.universe) if args.universe else parse_universe(config)
+    if not universe:
+        raise ValueError("Universe is empty. Use --config or --universe.")
+    provider = build_provider(args.provider, args.data_file, args.cache_dir, not args.no_cache)
+    result = compare_universe(universe, provider, start=args.start, end=args.end)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result.summary.to_csv(output_dir / "summary.csv", index=False)
+    result.normalized.to_csv(output_dir / "normalized.csv", index=False)
+    result.correlation.to_csv(output_dir / "correlation.csv")
+    print(result.summary.to_string(index=False))
+    if result.failures:
+        print("\nSkipped:")
+        for failure in result.failures:
+            print(f"  {failure}")
+    print(f"\nWrote {output_dir}")
+    return 0
+
+
+def cmd_alerts(args: argparse.Namespace) -> int:
+    config = load_yaml(args.config) if args.config else {}
+    universe = parse_universe_argument(args.universe) if args.universe else parse_universe(config)
+    if not universe:
+        raise ValueError("Universe is empty. Use --config or --universe.")
+    provider = build_provider(args.provider, args.data_file, args.cache_dir, not args.no_cache)
+    alerts = scan_alerts(
+        universe,
+        provider,
+        rule=AlertRule(
+            min_score=args.min_score,
+            max_rsi=args.max_rsi,
+            min_rsi=args.min_rsi,
+            max_drawdown=args.max_drawdown,
+            min_momentum_20_pct=args.min_momentum_20_pct,
+            include_all=args.include_all,
+        ),
+        start=args.start,
+        end=args.end,
+    )
+    print(alerts.to_string(index=False))
+    failures = alerts.attrs.get("failures", [])
+    if failures:
+        print("\nSkipped:")
+        for failure in failures:
+            print(f"  {failure}")
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        alerts.to_csv(args.output, index=False)
+        print(f"\nWrote {args.output}")
+    return 0
+
+
+def cmd_optimize(args: argparse.Namespace) -> int:
+    provider = build_provider(args.provider, args.data_file, args.cache_dir, not args.no_cache)
+    prices = provider.get_history(
+        args.symbol,
+        args.market,
+        start=args.start,
+        end=args.end,
+        adjust=args.adjust,
+        interval=args.interval,
+    )
+    results = optimize_ma_strategy(
+        prices,
+        short_windows=_parse_int_list(args.short_windows),
+        long_windows=_parse_int_list(args.long_windows),
+        config=BacktestConfig(
+            initial_cash=args.initial_cash,
+            commission_bps=args.commission_bps,
+            slippage_bps=args.slippage_bps,
+        ),
+        rank_metric=args.rank_metric,
+    )
+    print(results.to_string(index=False))
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        results.to_csv(args.output, index=False)
+        print(f"\nWrote {args.output}")
+    return 0
+
+
 def build_provider(
     name: str,
     data_file: str | None,
@@ -284,6 +414,13 @@ def configure_logging(verbose: bool) -> None:
 
 def _coalesce(value: Any, fallback: Any) -> Any:
     return fallback if value is None else value
+
+
+def _parse_int_list(raw: str) -> list[int]:
+    values = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise ValueError("Expected at least one integer.")
+    return values
 
 
 def print_analysis(report: dict[str, Any]) -> None:

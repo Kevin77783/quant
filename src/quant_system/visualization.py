@@ -153,6 +153,99 @@ def make_weights_figure(weights: pd.DataFrame) -> go.Figure:
     return _style_figure(fig)
 
 
+def make_normalized_performance_figure(normalized: pd.DataFrame) -> go.Figure:
+    data = normalized.copy()
+    date = data.pop("date")
+    fig = go.Figure()
+    for column in data.columns:
+        fig.add_trace(go.Scatter(x=date, y=data[column], mode="lines", name=column, line=dict(width=2)))
+    fig.update_layout(title="Normalized Performance", height=460, yaxis_title="Base 100")
+    return _style_figure(fig)
+
+
+def make_correlation_heatmap(correlation: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(
+        go.Heatmap(
+            z=correlation.values,
+            x=correlation.columns,
+            y=correlation.index,
+            zmin=-1,
+            zmax=1,
+            colorscale="RdBu",
+            reversescale=True,
+            colorbar=dict(title="Corr"),
+            hovertemplate="%{y} vs %{x}<br>corr=%{z:.2f}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Return Correlation", height=460)
+    return _style_figure(fig)
+
+
+def make_risk_return_scatter(summary: pd.DataFrame) -> go.Figure:
+    if summary.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No comparison data.", x=0.5, y=0.5, showarrow=False)
+        fig.update_layout(title="Risk / Return", height=430)
+        return _style_figure(fig)
+    fig = go.Figure(
+        go.Scatter(
+            x=summary["annual_volatility"],
+            y=summary["total_return"],
+            mode="markers+text",
+            text=summary["symbol"],
+            textposition="top center",
+            marker=dict(
+                size=(summary["sharpe"].clip(lower=-1, upper=3) + 1.5) * 10,
+                color=summary["max_drawdown"],
+                colorscale="RdYlGn",
+                showscale=True,
+                colorbar=dict(title="Max DD"),
+                line=dict(color="#334155", width=1),
+            ),
+            customdata=summary[["market", "sharpe", "win_rate"]],
+            hovertemplate="symbol=%{text}<br>market=%{customdata[0]}<br>return=%{y:.2%}<br>vol=%{x:.2%}<br>sharpe=%{customdata[1]:.2f}<br>win=%{customdata[2]:.2%}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Risk / Return", height=430, xaxis_title="Annual Volatility", yaxis_title="Total Return")
+    return _style_figure(fig)
+
+
+def make_optimization_heatmap(results: pd.DataFrame, metric: str = "sharpe") -> go.Figure:
+    pivot = results.pivot(index="long_window", columns="short_window", values=metric).sort_index(ascending=False)
+    fig = go.Figure(
+        go.Heatmap(
+            z=pivot.values,
+            x=pivot.columns,
+            y=pivot.index,
+            colorscale="Viridis",
+            colorbar=dict(title=metric),
+            hovertemplate="short=%{x}<br>long=%{y}<br>" + metric + "=%{z:.4f}<extra></extra>",
+        )
+    )
+    fig.update_layout(title=f"MA Optimization: {metric}", height=430, xaxis_title="Short Window", yaxis_title="Long Window")
+    return _style_figure(fig)
+
+
+def make_alerts_bar(alerts: pd.DataFrame) -> go.Figure:
+    if alerts.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No alerts triggered.", x=0.5, y=0.5, showarrow=False)
+        fig.update_layout(title="Alerts", height=360)
+        return _style_figure(fig)
+    fig = go.Figure(
+        go.Bar(
+            x=alerts["symbol"],
+            y=alerts["trigger_count"],
+            marker_color=alerts["score"],
+            marker_colorscale="RdYlGn",
+            text=alerts["alerts"],
+            hovertemplate="%{x}<br>triggers=%{y}<br>%{text}<extra></extra>",
+        )
+    )
+    fig.update_layout(title="Alert Trigger Count", height=360, xaxis_title="Symbol", yaxis_title="Triggers")
+    return _style_figure(fig)
+
+
 def _style_figure(fig: go.Figure, height: int | None = None, show_rangeslider: bool = False) -> go.Figure:
     fig.update_layout(
         template="plotly_white",

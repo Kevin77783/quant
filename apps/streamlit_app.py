@@ -3,16 +3,27 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from quant_system.analysis import add_indicators, analyze_prices, screen_universe
-from quant_system.backtest import BacktestConfig, BacktestEngine, PortfolioBacktestConfig, PortfolioBacktestEngine
+from quant_system.analysis import AlertRule, add_indicators, analyze_prices, compare_universe, scan_alerts, screen_universe
+from quant_system.backtest import (
+    BacktestConfig,
+    BacktestEngine,
+    PortfolioBacktestConfig,
+    PortfolioBacktestEngine,
+    optimize_ma_strategy,
+)
 from quant_system.config import load_yaml, parse_universe
 from quant_system.risk import fixed_fraction_position
 from quant_system.strategies import build_strategy
 from quant_system.timeframe import resample_ohlcv
 from quant_system.visualization import (
     make_candlestick_figure,
+    make_alerts_bar,
+    make_correlation_heatmap,
     make_equity_drawdown_figure,
     make_factor_bar,
+    make_normalized_performance_figure,
+    make_optimization_heatmap,
+    make_risk_return_scatter,
     make_score_gauge,
     make_screen_scatter,
     make_weights_figure,
@@ -90,7 +101,11 @@ def metrics_frame(metrics: dict[str, float]) -> pd.DataFrame:
 
 with st.sidebar:
     st.title("Quant Workbench")
-    view = st.radio("Workspace", ["Single Stock", "Universe Screen", "Portfolio Backtest"], label_visibility="collapsed")
+    view = st.radio(
+        "Workspace",
+        ["Single Stock", "Compare", "Alerts", "Universe Screen", "Portfolio Backtest"],
+        label_visibility="collapsed",
+    )
 
     st.markdown('<div class="section-title">Data</div>', unsafe_allow_html=True)
     provider_name = st.selectbox("Provider", ["csv", "auto", "yahoo", "akshare"], index=0)
@@ -148,8 +163,8 @@ if view == "Single Stock":
         kpi_cols[3].metric("20D Momentum", f"{report['signals']['momentum_20_pct']:.2f}%")
         kpi_cols[4].metric("20D Volatility", fmt_pct(float(report["signals"]["volatility_20"])))
 
-        chart_tab, factor_tab, backtest_tab, risk_tab, data_tab = st.tabs(
-            ["K Line", "Factors", "Backtest", "Risk", "Data"]
+        chart_tab, factor_tab, backtest_tab, optimize_tab, risk_tab, data_tab = st.tabs(
+            ["K Line", "Factors", "Backtest", "Optimize", "Risk", "Data"]
         )
 
         with chart_tab:
@@ -185,6 +200,28 @@ if view == "Single Stock":
             if not result.trades.empty:
                 st.dataframe(result.trades, use_container_width=True, hide_index=True)
 
+        with optimize_tab:
+            opt_cols = st.columns([1, 1, 1])
+            short_grid = opt_cols[0].text_input("Short windows", "3,5,10")
+            long_grid = opt_cols[1].text_input("Long windows", "20,40,60")
+            rank_metric = opt_cols[2].selectbox("Rank metric", ["sharpe", "total_return", "excess_total_return", "max_drawdown"], index=0)
+            short_values = [int(value.strip()) for value in short_grid.split(",") if value.strip()]
+            long_values = [int(value.strip()) for value in long_grid.split(",") if value.strip()]
+            optimized = optimize_ma_strategy(
+                prices,
+                short_windows=short_values,
+                long_windows=long_values,
+                config=BacktestConfig(
+                    initial_cash=float(initial_cash),
+                    commission_bps=float(commission_bps),
+                    slippage_bps=float(slippage_bps),
+                    risk_free_rate=float(risk_free_rate),
+                ),
+                rank_metric=rank_metric,
+            )
+            st.plotly_chart(make_optimization_heatmap(optimized, metric=rank_metric), use_container_width=True)
+            st.dataframe(optimized, use_container_width=True, hide_index=True)
+
         with risk_tab:
             risk_cols = st.columns(4)
             account_cash = risk_cols[0].number_input("Account cash", min_value=1000, value=100000, step=10000)
@@ -210,7 +247,54 @@ else:
     universe = parse_universe(config)
     provider = build_provider(provider_name, data_file, cache_dir, use_cache)
 
-    if view == "Universe Screen":
+    if view == "Compare":
+        compare_cols = st.columns([1, 1, 1])
+        selected_markets = compare_cols[0].multiselect("Markets", ["cn", "hk", "us"], default=["cn", "hk", "us"])
+        max_symbols = compare_cols[1].number_input("Max symbols", min_value=1, value=6)
+        run_compare = compare_cols[2].button("Run compare", use_container_width=True, type="primary")
+        if run_compare:
+            scoped = [security for security in universe if security.market.value in selected_markets][: int(max_symbols)]
+            result = compare_universe(scoped, provider, start=start, end=end)
+            st.plotly_chart(make_normalized_performance_figure(result.normalized), use_container_width=True)
+            left, right = st.columns(2)
+            with left:
+                st.plotly_chart(make_risk_return_scatter(result.summary), use_container_width=True)
+            with right:
+                st.plotly_chart(make_correlation_heatmap(result.correlation), use_container_width=True)
+            st.dataframe(result.summary, use_container_width=True, hide_index=True)
+            if result.failures:
+                st.warning("\n".join(result.failures))
+
+    elif view == "Alerts":
+        alert_cols = st.columns([1, 1, 1, 1, 1, 1])
+        min_score = alert_cols[0].number_input("Min score", min_value=0.0, max_value=100.0, value=80.0)
+        max_rsi = alert_cols[1].number_input("Max RSI", min_value=50.0, max_value=100.0, value=75.0)
+        min_rsi = alert_cols[2].number_input("Min RSI", min_value=0.0, max_value=50.0, value=30.0)
+        max_drawdown = alert_cols[3].number_input("Max drawdown", min_value=-1.0, max_value=0.0, value=-0.10)
+        weak_momentum = alert_cols[4].number_input("Weak momentum %", min_value=-100.0, max_value=50.0, value=-5.0)
+        include_all = alert_cols[5].toggle("Include all", value=False)
+        if st.button("Scan alerts", use_container_width=True, type="primary"):
+            result = scan_alerts(
+                universe,
+                provider,
+                rule=AlertRule(
+                    min_score=float(min_score),
+                    max_rsi=float(max_rsi),
+                    min_rsi=float(min_rsi),
+                    max_drawdown=float(max_drawdown),
+                    min_momentum_20_pct=float(weak_momentum),
+                    include_all=bool(include_all),
+                ),
+                start=start,
+                end=end,
+            )
+            st.plotly_chart(make_alerts_bar(result), use_container_width=True)
+            st.dataframe(result, use_container_width=True, hide_index=True)
+            failures = result.attrs.get("failures", [])
+            if failures:
+                st.warning("\n".join(failures))
+
+    elif view == "Universe Screen":
         screen_cols = st.columns([1, 1, 1, 1])
         top = screen_cols[0].number_input("Top N", min_value=1, value=10)
         selected_markets = screen_cols[1].multiselect("Markets", ["cn", "hk", "us"], default=["cn", "hk", "us"])
